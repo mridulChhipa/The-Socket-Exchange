@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #include <sys/socket.h>
-#include <arpa/inet.h> // Didn't used <netinet/in.h> because we also need inet_<name> functions
+#include <arpa/inet.h>
 
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
@@ -17,11 +17,18 @@ char buffer[BUFFER_SIZE];
 
 void communicate(int client_fd)
 {
+  int i;
   while (true)
   {
     memset(buffer, 0, sizeof(buffer));
-    // write(client_fd, buffer, sizeof(buffer)); // Send an empty buffer to the server to initiate communication
+    i = 0;
+    while ((buffer[i++] = getchar()) != '\n' && i < BUFFER_SIZE - 1)
+      ;
+
+    write(client_fd, buffer, sizeof(buffer));
+
     memset(buffer, 0, sizeof(buffer));
+
     ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
     if (bytes_read == -1)
     {
@@ -31,7 +38,7 @@ void communicate(int client_fd)
     }
     else if (bytes_read == 0)
     {
-      printf("Client disconnected\n");
+      printf("Server disconnected\n");
       close(client_fd);
       return;
     }
@@ -60,12 +67,6 @@ int main(int argc, char *argv[])
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(PORT);
 
-  /*
-  The thrird argument of inet_pton() is a void pointer to the destination address structure.
-  All non-function pointer type arguments are implicitly converted to void pointers in C, so we can pass the address of the sin_addr field directly without casting it to a void pointer.
-
-  Obsolete: server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-  */
   inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
 
   if (connect(client_fd, (struct sockaddr *)&server_addr, server_addr_len) == -1)

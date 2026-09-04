@@ -41,6 +41,11 @@ To remove compiled files:
 make clean
 ```
 
+## Assumptions
+- The username is such that it fits the buffer.
+- Using epoll / kqueue for handling concurrent connections and multiplexing.
+- Using non-blocking sockets, otherwise the final recv() call would freeze the entire server waiting for data that hasn't arrived yet.
+
 ## Implementation Notes
 
 - Concurrency/I/O mechanism: `<select(), poll(), kqueue(), threads, or other>`
