@@ -3,3 +3,6 @@
 *.synctex.gz
 *.html
 report/*.pdf
+src/exchange_server
+src/trader_client
+src/market_data_client
