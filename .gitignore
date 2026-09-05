@@ -3,7 +3,14 @@
 *.synctex.gz
 *.html
 report/*.pdf
+__pycache__/
+
+# The Makefile builds into the submission root, not src/.
+/exchange_server
+/trader_client
+/market_data_client
+
+# Stale locations, kept so older checkouts stay clean.
 src/exchange_server
 src/trader_client
 src/market_data_client
-__pycache__/

@@ -304,6 +304,24 @@ int main(int argc, char *argv[])
   // rather than attached to a terminal.
   setvbuf(stdout, NULL, _IOLBF, 0);
 
+  // Usage: exchange_server [bind_address] [port]
+  const char *host = (argc > 1) ? argv[1] : NULL;
+  int port = PORT;
+
+  if (argc > 2)
+  {
+    char *end;
+    long value = strtol(argv[2], &end, 10);
+
+    if (*end != '\0' || value <= 0 || value > 65535)
+    {
+      printf("Invalid port: %s\n", argv[2]);
+      return 1;
+    }
+
+    port = (int)value;
+  }
+
   int server_fd;
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);
@@ -321,8 +339,16 @@ int main(int argc, char *argv[])
   memset(&server_addr, 0, sizeof(server_addr));
 
   server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(PORT);
+  server_addr.sin_port = htons(port);
+
+  // With no address given, listen on every interface.
+  if (host == NULL)
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  else if (inet_pton(AF_INET, host, &server_addr.sin_addr) != 1)
+  {
+    printf("Invalid bind address: %s\n", host);
+    return 1;
+  }
 
   int opt = 1;
   if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
@@ -349,7 +375,7 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Listening on port %d\n", PORT);
+  printf("Listening on %s:%d\n", host ? host : "0.0.0.0", port);
 
   // From here we can set up epoll to handle multiple client connections efficiently.
 

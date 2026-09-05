@@ -41,6 +41,54 @@ To remove compiled files:
 make clean
 ```
 
+## Run
+
+Use the launcher scripts in `server/` and `client/`. They pass every argument
+through to the underlying binary, so the caller does not need to know the
+implementation language.
+
+Start the Exchange Server:
+
+```sh
+./server/run-server [bind_address] [port]
+```
+
+Start a Trader Client:
+
+```sh
+./client/run-trader [host] [port] [username]
+```
+
+Start a Market-Data Client:
+
+```sh
+./client/run-market-data [host] [port] [instrument]
+```
+
+For example:
+
+```sh
+./server/run-server 127.0.0.1 5000
+./client/run-trader 127.0.0.1 5000 alice
+./client/run-market-data 127.0.0.1 5000 JNST
+```
+
+All arguments are optional. With none given the server listens on every
+interface on port 8080, and the clients connect to `127.0.0.1:8080`. If a
+Trader Client is given a username it sends `LOGIN <username>` on connecting;
+otherwise commands are read from standard input, one per line.
+
+## Test
+
+With the server running:
+
+```sh
+python3 testing/test_framing.py [host] [port]   # server-side message framing
+python3 testing/test_client.py                  # drives ./trader_client itself
+```
+
+Both exit non-zero if any check fails.
+
 ## Assumptions
 - Usernames are at most 127 characters. This is enforced and diagnosed rather than
   assumed: a longer name is rejected with `ERROR Username too long`, never truncated.

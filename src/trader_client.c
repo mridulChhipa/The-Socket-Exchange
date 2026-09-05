@@ -182,6 +182,25 @@ int main(int argc, char *argv[])
 
   setvbuf(stdout, NULL, _IOLBF, 0);
 
+  // Usage: trader_client [host] [port] [username]
+  const char *host = (argc > 1) ? argv[1] : SERVER_IP;
+  const char *username = (argc > 3) ? argv[3] : NULL;
+  int port = PORT;
+
+  if (argc > 2)
+  {
+    char *end;
+    long value = strtol(argv[2], &end, 10);
+
+    if (*end != '\0' || value <= 0 || value > 65535)
+    {
+      printf("Invalid port: %s\n", argv[2]);
+      return 1;
+    }
+
+    port = (int)value;
+  }
+
   int client_fd;
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);
@@ -197,9 +216,15 @@ int main(int argc, char *argv[])
 
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(PORT);
+  server_addr.sin_port = htons(port);
 
-  inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+  // inet_pton returns 0 for a malformed address, not -1.
+  if (inet_pton(AF_INET, host, &server_addr.sin_addr) != 1)
+  {
+    printf("Invalid server address: %s\n", host);
+    close(client_fd);
+    return 1;
+  }
 
   if (connect(client_fd, (struct sockaddr *)&server_addr, server_addr_len) == -1)
   {
@@ -209,6 +234,21 @@ int main(int argc, char *argv[])
   }
 
   printf("Connected to server successfully\n");
+
+  // A username on the command line means log in straight away, so the caller
+  // does not have to feed a LOGIN line in on stdin.
+  if (username != NULL)
+  {
+    char login[BUFFER_SIZE];
+    int len = snprintf(login, sizeof(login), "LOGIN %s\n", username);
+
+    if (len < 0 || (size_t)len >= sizeof(login) || !writeAll(client_fd, login, len))
+    {
+      printf("Failed to send LOGIN\n");
+      close(client_fd);
+      return 1;
+    }
+  }
 
   communicate(client_fd);
 
