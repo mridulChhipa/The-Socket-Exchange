@@ -5,6 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
+#include <poll.h>
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -13,17 +15,39 @@
 #define SERVER_IP "127.0.0.1"
 
 #define BUFFER_SIZE 1024
-
 #define RECVBUF_SIZE 128
 
-char buffer[BUFFER_SIZE];
+char inbuf[BUFFER_SIZE];
+size_t inlen = 0;
+bool discarding = false;
 
 char recvbuf[RECVBUF_SIZE];
 size_t recvlen = 0;
 
-int drainLines()
+bool writeAll(int fd, const char *data, size_t len)
 {
-  int lines = 0;
+  while (len > 0)
+  {
+    ssize_t written = write(fd, data, len);
+
+    if (written == -1)
+    {
+      if (errno == EINTR)
+        continue;
+
+      return false;
+    }
+
+    data += written;
+    len -= written;
+  }
+
+  return true;
+}
+
+// Prints every complete response currently buffered and keeps the partial tail.
+void drainResponses(void)
+{
   char *line = recvbuf, *newline;
 
   while ((newline = memchr(line, '\n', recvbuf + recvlen - line)) != NULL)
@@ -36,81 +60,114 @@ int drainLines()
     printf("Received from server: %s\n", line);
 
     line = newline + 1;
-    lines++;
   }
 
   recvlen -= line - recvbuf;
   memmove(recvbuf, line, recvlen);
+}
 
-  return lines;
+// Sends every complete line typed so far, newline included, and keeps the rest.
+bool sendPendingCommands(int client_fd)
+{
+  char *line = inbuf, *newline;
+
+  while ((newline = memchr(line, '\n', inbuf + inlen - line)) != NULL)
+  {
+    size_t len = newline - line + 1;
+
+    if (discarding)
+      discarding = false;
+    else if (len > 1 && !writeAll(client_fd, line, len))
+      return false;
+
+    line = newline + 1;
+  }
+
+  inlen -= line - inbuf;
+  memmove(inbuf, line, inlen);
+
+  if (inlen == sizeof(inbuf))
+  {
+    printf("Input line too long, discarded\n");
+    discarding = true;
+    inlen = 0;
+  }
+
+  return true;
 }
 
 void communicate(int client_fd)
 {
+  struct pollfd fds[2];
+
+  fds[0].fd = STDIN_FILENO;
+  fds[0].events = POLLIN;
+  fds[1].fd = client_fd;
+  fds[1].events = POLLIN;
+
   while (true)
   {
-    int i = 0;
-    int c;
-    while (i < BUFFER_SIZE - 1 && (c = getchar()) != EOF && c != '\n')
-      buffer[i++] = c;
-    buffer[i] = '\0';
-
-    if (c == EOF && i == 0)
+    if (poll(fds, 2, -1) == -1)
     {
-      printf("Input closed, exiting\n");
-      close(client_fd);
+      if (errno == EINTR)
+        continue;
+
+      printf("Failed to wait for input\n");
       return;
     }
 
-    // A blank line is not a protocol message; sending it would leave us waiting
-    // for a response the server has no reason to send.
-    if (i == 0)
-      continue;
-
-    bool quitting = (strcmp(buffer, "QUIT") == 0);
-
-    buffer[i] = '\n';
-
-    if (write(client_fd, buffer, i + 1) == -1)
+    // The server is serviced first so that anything which arrived while the
+    // user was typing is shown before the next command goes out.
+    if (fds[1].revents)
     {
-      printf("Failed to write to server\n");
-      close(client_fd);
-      return;
-    }
-
-    // A response may be split across several reads, or share one segment with a
-    // response still buffered from last time, so keep reading until at least one
-    // complete line is available.
-    while (drainLines() == 0)
-    {
-      if (recvlen == sizeof(recvbuf))
-      {
-        printf("Server sent an over-long response\n");
-        close(client_fd);
-        return;
-      }
-
       ssize_t bytes_read = read(client_fd, recvbuf + recvlen, sizeof(recvbuf) - recvlen);
+
       if (bytes_read == -1)
       {
         printf("Failed to read from server\n");
-        close(client_fd);
         return;
       }
       else if (bytes_read == 0)
       {
-        printf("Server disconnected\n");
-        close(client_fd);
+        printf("Server closed the connection\n");
         return;
       }
 
       recvlen += bytes_read;
+      drainResponses();
+
+      if (recvlen == sizeof(recvbuf))
+      {
+        printf("Server sent an over-long response\n");
+        return;
+      }
     }
 
-    if (quitting)
+    if (fds[0].revents)
     {
-      close(client_fd);
-      return;
+      ssize_t bytes_read = read(STDIN_FILENO, inbuf + inlen, sizeof(inbuf) - inlen);
+
+      if (bytes_read == -1)
+      {
+        printf("Failed to read input\n");
+        return;
+      }
+      else if (bytes_read == 0)
+      {
+        // No more commands are coming, so half-close to send FIN and stop
+        // polling stdin, but stay to collect whatever the server still sends.
+        shutdown(client_fd, SHUT_WR);
+        fds[0].fd = -1;
+        continue;
+      }
+
+      inlen += bytes_read;
+
+      if (!sendPendingCommands(client_fd))
+      {
+        printf("Failed to write to server\n");
+        return;
+      }
     }
   }
 }
@@ -122,6 +179,8 @@ int main(int argc, char *argv[])
     printf("Failed to ignore SIGPIPE\n");
     return 1;
   }
+
+  setvbuf(stdout, NULL, _IOLBF, 0);
 
   int client_fd;
   struct sockaddr_in server_addr;
@@ -152,6 +211,8 @@ int main(int argc, char *argv[])
   printf("Connected to server successfully\n");
 
   communicate(client_fd);
+
+  close(client_fd);
 
   return 0;
 }

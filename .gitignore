@@ -6,3 +6,4 @@ report/*.pdf
 src/exchange_server
 src/trader_client
 src/market_data_client
+__pycache__/

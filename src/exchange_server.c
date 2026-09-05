@@ -300,6 +300,10 @@ int main(int argc, char *argv[])
     return 1;
   }
 
+  // Line-buffer stdout so the log stays readable and ordered when it is piped
+  // rather than attached to a terminal.
+  setvbuf(stdout, NULL, _IOLBF, 0);
+
   int server_fd;
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);
@@ -387,13 +391,19 @@ int main(int argc, char *argv[])
       {
         while (true)
         {
-          printf("Accepting new client connection...\n");
           struct sockaddr_in caddr;
           socklen_t caddr_len = sizeof(caddr);
           int client_fd = accept(server_fd, (struct sockaddr *)&caddr, &caddr_len);
           if (client_fd == -1)
           {
-            printf("Failed to accept client connection: %s\n", strerror(errno));
+            // An interrupted or aborted attempt is worth retrying; EAGAIN just
+            // means the backlog is drained, which is how this loop ends.
+            if (errno == EINTR || errno == ECONNABORTED)
+              continue;
+
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+              printf("Failed to accept client connection: %s\n", strerror(errno));
+
             break;
           }
 
