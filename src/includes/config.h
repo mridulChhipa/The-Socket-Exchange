@@ -1,0 +1,20 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define PORT 8080
+#define USERNAME_LENGTH 128
+#define MIN_CAPACITY 10
+#define MAX_EVENTS 64
+
+#define MAX_CMD_LEN 11
+#define MAX_INSTRUMENT_LEN 4
+#define MAX_INT_DIGITS 10
+
+#define MAX_LINE_LEN (MAX_CMD_LEN + 1 + (USERNAME_LENGTH - 1) + 1)
+
+#define MAX_TOKEN_LEN 159
+#define INBUF_SIZE (MAX_TOKEN_LEN + 1)
+
+#define OUTBUF_SIZE 4096
+
+#endif
