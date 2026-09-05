@@ -27,6 +27,8 @@
 #define MAX_TOKEN_LEN 159
 #define INBUF_SIZE (MAX_TOKEN_LEN + 1)
 
+#define OUTBUF_SIZE 4096
+
 struct ClientConnection
 {
   socklen_t caddr_len;
@@ -38,6 +40,9 @@ struct ClientConnection
   size_t inlen;
   size_t scanned;
   bool discarding;
+  char *outbuf;
+  size_t outlen;
+  bool closing;
 };
 
 void setNonBlocking(int fd)
@@ -49,16 +54,80 @@ void setNonBlocking(int fd)
   }
 }
 
-// Returns false so callers can `return replyError(...)`: a protocol error is
-// reported to the client but never closes the connection.
-bool replyError(int client_fd, const char *reason)
+bool flushToClient(struct ClientConnection *conn)
+{
+  while (conn->outlen > 0)
+  {
+    ssize_t written = write(conn->client_fd, conn->outbuf, conn->outlen);
+
+    if (written == -1)
+    {
+      if (errno == EINTR)
+        continue;
+
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return false;
+
+      return true;
+    }
+
+    conn->outlen -= written;
+    memmove(conn->outbuf, conn->outbuf + written, conn->outlen);
+  }
+
+  return conn->closing;
+}
+
+bool sendToClient(struct ClientConnection *conn, const char *data, size_t len)
+{
+  if (conn->outlen == 0)
+  {
+    ssize_t written;
+
+    do
+    {
+      written = write(conn->client_fd, data, len);
+    } while (written == -1 && errno == EINTR);
+
+    if (written == -1)
+    {
+      if (errno != EAGAIN && errno != EWOULDBLOCK)
+        return true;
+
+      written = 0;
+    }
+
+    data += written;
+    len -= written;
+  }
+
+  if (len == 0)
+    return false;
+
+  if (conn->outbuf == NULL && (conn->outbuf = malloc(OUTBUF_SIZE)) == NULL)
+    return true;
+
+  if (conn->outlen + len > OUTBUF_SIZE)
+    return true;
+
+  memcpy(conn->outbuf + conn->outlen, data, len);
+  conn->outlen += len;
+
+  return false;
+}
+
+bool sendLine(struct ClientConnection *conn, const char *line)
+{
+  return sendToClient(conn, line, strlen(line));
+}
+
+bool replyError(struct ClientConnection *conn, const char *reason)
 {
   char response[64];
 
   snprintf(response, sizeof(response), "ERROR %s\n", reason);
-  write(client_fd, response, strlen(response));
 
-  return false;
+  return sendLine(conn, response);
 }
 
 void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
@@ -68,41 +137,39 @@ void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, 
     printf("Failed to remove client socket from epoll\n");
   }
 
-  close(client_fd);
-
   if (client_fd < curr_cap && conns[client_fd] != NULL)
   {
     struct ClientConnection *conn = conns[client_fd];
+
+    // A client that asked to leave gets an explicit FIN now that its final
+    // reply has gone out. An abrupt teardown just closes.
+    if (conn->closing)
+      shutdown(client_fd, SHUT_WR);
 
     if (conn->logged_in)
       printf("Client %s:%d (user %s) disconnected\n", inet_ntoa(conn->caddr.sin_addr), ntohs(conn->caddr.sin_port), conn->username);
     else
       printf("Client %s:%d disconnected\n", inet_ntoa(conn->caddr.sin_addr), ntohs(conn->caddr.sin_port));
 
+    free(conn->outbuf);
     free(conn);
     conns[client_fd] = NULL;
   }
+
+  // Released last, so the descriptor number cannot be recycled by an accept()
+  // while it is still being used to index the connection table.
+  close(client_fd);
 }
 
-void loginUser(const char *username, int client_fd, struct ClientConnection **conns, int curr_cap)
+bool loginUser(const char *username, struct ClientConnection *self, struct ClientConnection **conns, int curr_cap)
 {
-  struct ClientConnection *self = conns[client_fd];
-
   if (self->logged_in)
-  {
-    const char *response = "ERROR Already logged in\n";
-    write(client_fd, response, strlen(response));
-    return;
-  }
+    return replyError(self, "Already logged in");
 
   for (int i = 0; i < curr_cap; i++)
   {
     if (conns[i] != NULL && conns[i]->logged_in && strcmp(conns[i]->username, username) == 0)
-    {
-      const char *response = "ERROR Username already in use\n";
-      write(client_fd, response, strlen(response));
-      return;
-    }
+      return replyError(self, "Username already in use");
   }
 
   strncpy(self->username, username, USERNAME_LENGTH - 1);
@@ -111,29 +178,17 @@ void loginUser(const char *username, int client_fd, struct ClientConnection **co
 
   printf("User %s logged in from %s:%d\n", self->username, inet_ntoa(self->caddr.sin_addr), ntohs(self->caddr.sin_port));
 
-  const char *response = "OK\n";
-  write(client_fd, response, strlen(response));
+  return sendLine(self, "OK\n");
 }
 
-void quitUser(int client_fd, struct ClientConnection **conns)
+bool quitUser(struct ClientConnection *self)
 {
-  struct ClientConnection *self = conns[client_fd];
+  self->closing = true;
 
-  if (!self->logged_in)
-  {
-    const char *response = "ERROR Not logged in\n";
-    write(client_fd, response, strlen(response));
-    return;
-  }
-
-  printf("User %s logged out\n", self->username);
-  self->logged_in = false;
-
-  const char *response = "OK\n";
-  write(client_fd, response, strlen(response));
+  return sendLine(self, "OK\n") || self->outlen == 0;
 }
 
-bool processLine(char *line, int client_fd, struct ClientConnection **conns, int curr_cap)
+bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap)
 {
   char cmd[INBUF_SIZE], arg[INBUF_SIZE];
 
@@ -142,32 +197,31 @@ bool processLine(char *line, int client_fd, struct ClientConnection **conns, int
   if (matched < 1)
     return false;
 
-  printf("Received from client %d: %s\n", client_fd, line);
+  printf("Received from client %d: %s\n", conn->client_fd, line);
 
   if (strlen(cmd) > (size_t)MAX_CMD_LEN)
-    return replyError(client_fd, "Unknown command");
+    return replyError(conn, "Unknown command");
 
   if (strcmp(cmd, "LOGIN") == 0 && matched == 2)
   {
     if (strlen(arg) > (size_t)(USERNAME_LENGTH - 1))
-      return replyError(client_fd, "Username too long");
+      return replyError(conn, "Username too long");
 
-    loginUser(arg, client_fd, conns, curr_cap);
-    return false;
+    return loginUser(arg, conn, conns, curr_cap);
   }
 
   if (strcmp(cmd, "QUIT") == 0 && matched == 1)
-  {
-    quitUser(client_fd, conns);
-    return true;
-  }
+    return quitUser(conn);
 
-  return replyError(client_fd, "Unknown command");
+  return replyError(conn, "Unknown command");
 }
 
 bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
 {
   struct ClientConnection *self = conns[client_fd];
+
+  if (self->closing)
+    return false;
 
   while (true)
   {
@@ -212,8 +266,11 @@ bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
       if (line_len > 0 && line[line_len - 1] == '\r')
         line[line_len - 1] = '\0';
 
-      if (processLine(line, client_fd, conns, curr_cap))
+      if (processLine(line, self, conns, curr_cap))
         return true;
+
+      if (self->closing)
+        return false;
     }
 
     self->inlen -= consumed;
@@ -224,7 +281,9 @@ bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
     {
       if (!self->discarding)
       {
-        replyError(client_fd, "Message too long");
+        if (replyError(self, "Message too long"))
+          return true;
+
         self->discarding = true;
       }
 
@@ -369,7 +428,7 @@ int main(int argc, char *argv[])
           conns[client_fd]->caddr = caddr;
           conns[client_fd]->caddr_len = caddr_len;
 
-          kev.events = EPOLLIN | EPOLLET;
+          kev.events = EPOLLIN | EPOLLOUT | EPOLLET;
           kev.data.fd = client_fd;
           if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &kev) == -1)
           {
@@ -386,8 +445,18 @@ int main(int argc, char *argv[])
       }
       else
       {
-        printf("Handling communication for client %d\n", curr_fd);
-        if (communicate(curr_fd, conns, curr_cap))
+        struct ClientConnection *conn = conns[curr_fd];
+        bool done = (events[i].events & (EPOLLERR | EPOLLHUP)) != 0;
+
+        // Drain pending output first: it frees buffer space and gets replies
+        // moving again before this client is allowed to queue any more.
+        if (!done && (events[i].events & EPOLLOUT))
+          done = flushToClient(conn);
+
+        if (!done && (events[i].events & EPOLLIN))
+          done = communicate(curr_fd, conns, curr_cap);
+
+        if (done)
         {
           printf("Removing client %d from epoll and closing connection\n", curr_fd);
           removeClient(curr_fd, epoll_fd, conns, curr_cap);
