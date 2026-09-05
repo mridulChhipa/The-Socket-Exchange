@@ -29,21 +29,43 @@
 
 #define OUTBUF_SIZE 4096
 
+enum Type
+{
+  none,
+  trader,
+  market
+};
+
 struct ClientConnection
 {
-  socklen_t caddr_len;
-  int client_fd;
-  struct sockaddr_in caddr;
-  bool logged_in;
-  char username[USERNAME_LENGTH];
-  char inbuf[INBUF_SIZE];
+  char *outbuf;
   size_t inlen;
   size_t scanned;
-  bool discarding;
-  char *outbuf;
   size_t outlen;
+  struct sockaddr_in caddr;
+  socklen_t caddr_len;
+  int client_fd;
+  enum Type type;
+  bool logged_in;
+  bool discarding;
   bool closing;
+  bool subscribedJNST;
+  bool subscribedIMCT;
+  char username[USERNAME_LENGTH];
+  char inbuf[INBUF_SIZE];
 };
+
+/*
+Cleared by SIGINT/SIGTERM. epoll_wait is never restarted after a signal, so
+the loop always gets a chance to notice this.
+*/
+static volatile sig_atomic_t running = 1;
+
+void requestShutdown(int signum)
+{
+  (void)signum;
+  running = 0;
+}
 
 void setNonBlocking(int fd)
 {
@@ -141,8 +163,6 @@ void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, 
   {
     struct ClientConnection *conn = conns[client_fd];
 
-    // A client that asked to leave gets an explicit FIN now that its final
-    // reply has gone out. An abrupt teardown just closes.
     if (conn->closing)
       shutdown(client_fd, SHUT_WR);
 
@@ -156,13 +176,14 @@ void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, 
     conns[client_fd] = NULL;
   }
 
-  // Released last, so the descriptor number cannot be recycled by an accept()
-  // while it is still being used to index the connection table.
   close(client_fd);
 }
 
 bool loginUser(const char *username, struct ClientConnection *self, struct ClientConnection **conns, int curr_cap)
 {
+  if (self->type == market)
+    return replyError(self, "Market data clients cannot log in");
+
   if (self->logged_in)
     return replyError(self, "Already logged in");
 
@@ -171,6 +192,8 @@ bool loginUser(const char *username, struct ClientConnection *self, struct Clien
     if (conns[i] != NULL && conns[i]->logged_in && strcmp(conns[i]->username, username) == 0)
       return replyError(self, "Username already in use");
   }
+
+  self->type = trader;
 
   strncpy(self->username, username, USERNAME_LENGTH - 1);
   self->username[USERNAME_LENGTH - 1] = '\0';
@@ -181,11 +204,67 @@ bool loginUser(const char *username, struct ClientConnection *self, struct Clien
   return sendLine(self, "OK\n");
 }
 
+bool subscribeClient(const char *instrument, struct ClientConnection *self)
+{
+  if (self->type == trader)
+    return replyError(self, "Traders cannot subscribe to market data");
+
+  if (strcmp(instrument, "JNST") == 0)
+  {
+    if (self->subscribedJNST)
+      return replyError(self, "Already subscribed to JNST");
+    self->subscribedJNST = true;
+  }
+  else if (strcmp(instrument, "IMCT") == 0)
+  {
+    if (self->subscribedIMCT)
+      return replyError(self, "Already subscribed to IMCT");
+    self->subscribedIMCT = true;
+  }
+  else
+  {
+    return replyError(self, "Invalid instrument");
+  }
+
+  self->type = market;
+
+  printf("Data client subscribed to %s from %s:%d\n", instrument, inet_ntoa(self->caddr.sin_addr), ntohs(self->caddr.sin_port));
+
+  return sendLine(self, "OK\n");
+}
+
 bool quitUser(struct ClientConnection *self)
 {
   self->closing = true;
 
   return sendLine(self, "OK\n") || self->outlen == 0;
+}
+
+bool unsubscribeClient(const char *instrument, struct ClientConnection *self)
+{
+  if (self->type == trader)
+    return replyError(self, "Traders cannot unsubscribe from market data");
+
+  if (strcmp(instrument, "JNST") == 0)
+  {
+    if (!self->subscribedJNST)
+      return replyError(self, "Not subscribed to JNST");
+    self->subscribedJNST = false;
+  }
+  else if (strcmp(instrument, "IMCT") == 0)
+  {
+    if (!self->subscribedIMCT)
+      return replyError(self, "Not subscribed to IMCT");
+    self->subscribedIMCT = false;
+  }
+  else
+  {
+    return replyError(self, "Invalid instrument");
+  }
+
+  printf("Data client unsubscribed from %s at %s:%d\n", instrument, inet_ntoa(self->caddr.sin_addr), ntohs(self->caddr.sin_port));
+
+  return sendLine(self, "OK\n");
 }
 
 bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap)
@@ -199,19 +278,25 @@ bool processLine(char *line, struct ClientConnection *conn, struct ClientConnect
 
   printf("Received from client %d: %s\n", conn->client_fd, line);
 
-  if (strlen(cmd) > (size_t)MAX_CMD_LEN)
+  if (strlen(cmd) > MAX_CMD_LEN)
     return replyError(conn, "Unknown command");
 
   if (strcmp(cmd, "LOGIN") == 0 && matched == 2)
   {
-    if (strlen(arg) > (size_t)(USERNAME_LENGTH - 1))
+    if (strlen(arg) > USERNAME_LENGTH - 1)
       return replyError(conn, "Username too long");
 
     return loginUser(arg, conn, conns, curr_cap);
   }
 
+  if (strcmp(cmd, "SUBSCRIBE") == 0 && matched == 2)
+    return subscribeClient(arg, conn);
+
   if (strcmp(cmd, "QUIT") == 0 && matched == 1)
     return quitUser(conn);
+
+  if (strcmp(cmd, "UNSUBSCRIBE") == 0 && matched == 2)
+    return unsubscribeClient(arg, conn);
 
   return replyError(conn, "Unknown command");
 }
@@ -300,11 +385,14 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  // Line-buffer stdout so the log stays readable and ordered when it is piped
-  // rather than attached to a terminal.
+  if (signal(SIGINT, requestShutdown) == SIG_ERR || signal(SIGTERM, requestShutdown) == SIG_ERR)
+  {
+    printf("Failed to install shutdown handler\n");
+    return 1;
+  }
+
   setvbuf(stdout, NULL, _IOLBF, 0);
 
-  // Usage: exchange_server [bind_address] [port]
   const char *host = (argc > 1) ? argv[1] : NULL;
   int port = PORT;
 
@@ -319,7 +407,7 @@ int main(int argc, char *argv[])
       return 1;
     }
 
-    port = (int)value;
+    port = value;
   }
 
   int server_fd;
@@ -341,7 +429,6 @@ int main(int argc, char *argv[])
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(port);
 
-  // With no address given, listen on every interface.
   if (host == NULL)
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
   else if (inet_pton(AF_INET, host, &server_addr.sin_addr) != 1)
@@ -405,10 +492,27 @@ int main(int argc, char *argv[])
 
   struct ClientConnection **conns = calloc(curr_cap, sizeof(struct ClientConnection *));
 
-  while (true)
+  if (conns == NULL)
+  {
+    printf("Failed to allocate connection table\n");
+    return 1;
+  }
+
+  while (running)
   {
     printf("Waiting for events...\n");
     int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+
+    if (nfds == -1)
+    {
+      // A signal interrupted the wait; the loop condition decides what next.
+      if (errno == EINTR)
+        continue;
+
+      printf("Failed to wait for events: %s\n", strerror(errno));
+      break;
+    }
+
     printf("Number of events: %d\n", nfds);
     for (int i = 0; i < nfds; i++)
     {
@@ -422,8 +526,9 @@ int main(int argc, char *argv[])
           int client_fd = accept(server_fd, (struct sockaddr *)&caddr, &caddr_len);
           if (client_fd == -1)
           {
-            // An interrupted or aborted attempt is worth retrying; EAGAIN just
-            // means the backlog is drained, which is how this loop ends.
+            /*
+            An interrupted or aborted attempt is worth retrying; EAGAIN just means the backlog is drained, which is how this loop ends.
+           */
             if (errno == EINTR || errno == ECONNABORTED)
               continue;
 
@@ -459,6 +564,14 @@ int main(int argc, char *argv[])
           }
 
           conns[client_fd] = calloc(1, sizeof(struct ClientConnection));
+
+          if (conns[client_fd] == NULL)
+          {
+            printf("Failed to allocate client connection\n");
+            close(client_fd);
+            continue;
+          }
+
           conns[client_fd]->client_fd = client_fd;
           conns[client_fd]->logged_in = false;
           conns[client_fd]->caddr = caddr;
@@ -484,8 +597,6 @@ int main(int argc, char *argv[])
         struct ClientConnection *conn = conns[curr_fd];
         bool done = (events[i].events & (EPOLLERR | EPOLLHUP)) != 0;
 
-        // Drain pending output first: it frees buffer space and gets replies
-        // moving again before this client is allowed to queue any more.
         if (!done && (events[i].events & EPOLLOUT))
           done = flushToClient(conn);
 
@@ -500,6 +611,16 @@ int main(int argc, char *argv[])
       }
     }
   }
+
+  printf("Shutting down, closing %d connection slots\n", curr_cap);
+
+  for (int i = 0; i < curr_cap; i++)
+  {
+    if (conns[i] != NULL)
+      removeClient(i, epoll_fd, conns, curr_cap);
+  }
+
+  free(conns);
 
   close(server_fd);
   close(epoll_fd);

@@ -256,6 +256,138 @@ def test_over_long_line_does_not_spam(host, port):
     c.close()
 
 
+# --- subscriptions and client roles ------------------------------------------
+
+
+def test_subscribe_round_trip(host, port):
+    c = Conn(host, port)
+    c.send("SUBSCRIBE JNST\n")
+    got = c.lines(1)
+    check("SUBSCRIBE JNST -> OK", got == ["OK"], f"got {got}")
+    c.close()
+
+
+def test_unsubscribe_replies_ok(host, port):
+    """A successful UNSUBSCRIBE must answer, not sit silent."""
+    c = Conn(host, port)
+    c.send("SUBSCRIBE JNST\nUNSUBSCRIBE JNST\n")
+    got = c.lines(2)
+    check("UNSUBSCRIBE after SUBSCRIBE -> OK", got == ["OK", "OK"], f"got {got}")
+    c.close()
+
+
+def test_duplicate_subscribe_rejected(host, port):
+    c = Conn(host, port)
+    c.send("SUBSCRIBE JNST\nSUBSCRIBE JNST\n")
+    got = c.lines(2)
+    check(
+        "subscribing twice to one instrument is rejected",
+        got == ["OK", "ERROR Already subscribed to JNST"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_unsubscribe_without_subscribe(host, port):
+    c = Conn(host, port)
+    c.send("UNSUBSCRIBE JNST\n")
+    got = c.lines(1)
+    check(
+        "UNSUBSCRIBE without a subscription is rejected",
+        got == ["ERROR Not subscribed to JNST"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_invalid_instrument_rejected(host, port):
+    c = Conn(host, port)
+    c.send("SUBSCRIBE GOOG\n")
+    got = c.lines(1)
+    check(
+        "unknown instrument is rejected",
+        got == ["ERROR Invalid instrument"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_invalid_instrument_does_not_fix_the_role(host, port):
+    """A rejected SUBSCRIBE must leave the connection free to LOGIN instead."""
+    c = Conn(host, port)
+    c.send("SUBSCRIBE GOOG\n")
+    c.lines(1)
+    c.send("LOGIN judy\n")
+    got = c.lines(1)
+    check(
+        "a failed SUBSCRIBE does not lock the client out of LOGIN",
+        got == ["OK"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_trader_cannot_subscribe(host, port):
+    c = Conn(host, port)
+    c.send("LOGIN karl\nSUBSCRIBE JNST\n")
+    got = c.lines(2)
+    check(
+        "a logged-in trader cannot subscribe",
+        got == ["OK", "ERROR Traders cannot subscribe to market data"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_trader_cannot_unsubscribe(host, port):
+    c = Conn(host, port)
+    c.send("LOGIN liam\nUNSUBSCRIBE JNST\n")
+    got = c.lines(2)
+    check(
+        "a logged-in trader cannot unsubscribe",
+        got == ["OK", "ERROR Traders cannot unsubscribe from market data"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_market_client_cannot_login(host, port):
+    c = Conn(host, port)
+    c.send("SUBSCRIBE JNST\nLOGIN mona\n")
+    got = c.lines(2)
+    check(
+        "a subscribed market-data client cannot log in",
+        got == ["OK", "ERROR Market data clients cannot log in"],
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_subscribe_without_instrument(host, port):
+    c = Conn(host, port)
+    c.send("SUBSCRIBE\n")
+    got = c.lines(1)
+    check(
+        "SUBSCRIBE with no instrument is rejected",
+        len(got) == 1 and got[0].startswith("ERROR"),
+        f"got {got}",
+    )
+    c.close()
+
+
+def test_subscription_commands_pipelined(host, port):
+    """Framing and the new commands together: three messages, one segment."""
+    c = Conn(host, port)
+    c.send("SUBSCRIBE JNST\nSUBSCRIBE IMCT\nUNSUBSCRIBE JNST\n")
+    got = c.lines(3)
+    check(
+        "three subscription commands in one segment -> three replies",
+        got == ["OK", "OK", "OK"],
+        f"got {got}",
+    )
+    c.close()
+
+
 # --- connection behaviour ----------------------------------------------------
 
 
@@ -324,6 +456,17 @@ TESTS = [
     test_command_word_too_long,
     test_over_long_line_reports_once_then_resyncs,
     test_over_long_line_does_not_spam,
+    test_subscribe_round_trip,
+    test_unsubscribe_replies_ok,
+    test_duplicate_subscribe_rejected,
+    test_unsubscribe_without_subscribe,
+    test_invalid_instrument_rejected,
+    test_invalid_instrument_does_not_fix_the_role,
+    test_trader_cannot_subscribe,
+    test_trader_cannot_unsubscribe,
+    test_market_client_cannot_login,
+    test_subscribe_without_instrument,
+    test_subscription_commands_pipelined,
     test_quit_without_login,
     test_server_closes_after_quit,
     test_duplicate_username_rejected,
