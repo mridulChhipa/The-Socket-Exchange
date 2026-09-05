@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -13,7 +14,36 @@
 
 #define BUFFER_SIZE 1024
 
+#define RECVBUF_SIZE 128
+
 char buffer[BUFFER_SIZE];
+
+char recvbuf[RECVBUF_SIZE];
+size_t recvlen = 0;
+
+int drainLines()
+{
+  int lines = 0;
+  char *line = recvbuf, *newline;
+
+  while ((newline = memchr(line, '\n', recvbuf + recvlen - line)) != NULL)
+  {
+    *newline = '\0';
+
+    if (newline > line && newline[-1] == '\r')
+      newline[-1] = '\0';
+
+    printf("Received from server: %s\n", line);
+
+    line = newline + 1;
+    lines++;
+  }
+
+  recvlen -= line - recvbuf;
+  memmove(recvbuf, line, recvlen);
+
+  return lines;
+}
 
 void communicate(int client_fd)
 {
@@ -22,7 +52,7 @@ void communicate(int client_fd)
     int i = 0;
     int c;
     while (i < BUFFER_SIZE - 1 && (c = getchar()) != EOF && c != '\n')
-      buffer[i++] = (char)c;
+      buffer[i++] = c;
     buffer[i] = '\0';
 
     if (c == EOF && i == 0)
@@ -32,33 +62,50 @@ void communicate(int client_fd)
       return;
     }
 
+    // A blank line is not a protocol message; sending it would leave us waiting
+    // for a response the server has no reason to send.
+    if (i == 0)
+      continue;
+
     bool quitting = (strcmp(buffer, "QUIT") == 0);
 
-    if (write(client_fd, buffer, i) == -1)
+    buffer[i] = '\n';
+
+    if (write(client_fd, buffer, i + 1) == -1)
     {
       printf("Failed to write to server\n");
       close(client_fd);
       return;
     }
 
-    memset(buffer, 0, sizeof(buffer));
-
-    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
-    if (bytes_read == -1)
+    // A response may be split across several reads, or share one segment with a
+    // response still buffered from last time, so keep reading until at least one
+    // complete line is available.
+    while (drainLines() == 0)
     {
-      printf("Failed to read from server\n");
-      close(client_fd);
-      return;
-    }
-    else if (bytes_read == 0)
-    {
-      printf("Server disconnected\n");
-      close(client_fd);
-      return;
-    }
+      if (recvlen == sizeof(recvbuf))
+      {
+        printf("Server sent an over-long response\n");
+        close(client_fd);
+        return;
+      }
 
-    buffer[bytes_read] = '\0';
-    printf("Received from server: %s\n", buffer);
+      ssize_t bytes_read = read(client_fd, recvbuf + recvlen, sizeof(recvbuf) - recvlen);
+      if (bytes_read == -1)
+      {
+        printf("Failed to read from server\n");
+        close(client_fd);
+        return;
+      }
+      else if (bytes_read == 0)
+      {
+        printf("Server disconnected\n");
+        close(client_fd);
+        return;
+      }
+
+      recvlen += bytes_read;
+    }
 
     if (quitting)
     {
@@ -70,6 +117,12 @@ void communicate(int client_fd)
 
 int main(int argc, char *argv[])
 {
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+  {
+    printf("Failed to ignore SIGPIPE\n");
+    return 1;
+  }
+
   int client_fd;
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);

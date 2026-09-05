@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -13,10 +14,18 @@
 #include <sys/epoll.h>
 
 #define PORT 8080
-#define BUFFER_SIZE 1024
-#define CMD_LENGTH 32
 #define USERNAME_LENGTH 128
 #define MIN_CAPACITY 10
+#define MAX_EVENTS 64
+
+#define MAX_CMD_LEN 11
+#define MAX_INSTRUMENT_LEN 4
+#define MAX_INT_DIGITS 10
+
+#define MAX_LINE_LEN (MAX_CMD_LEN + 1 + (USERNAME_LENGTH - 1) + 1)
+
+#define MAX_TOKEN_LEN 159
+#define INBUF_SIZE (MAX_TOKEN_LEN + 1)
 
 struct ClientConnection
 {
@@ -25,6 +34,10 @@ struct ClientConnection
   struct sockaddr_in caddr;
   bool logged_in;
   char username[USERNAME_LENGTH];
+  char inbuf[INBUF_SIZE];
+  size_t inlen;
+  size_t scanned;
+  bool discarding;
 };
 
 void setNonBlocking(int fd)
@@ -34,6 +47,18 @@ void setNonBlocking(int fd)
   {
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   }
+}
+
+// Returns false so callers can `return replyError(...)`: a protocol error is
+// reported to the client but never closes the connection.
+bool replyError(int client_fd, const char *reason)
+{
+  char response[64];
+
+  snprintf(response, sizeof(response), "ERROR %s\n", reason);
+  write(client_fd, response, strlen(response));
+
+  return false;
 }
 
 void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
@@ -108,17 +133,45 @@ void quitUser(int client_fd, struct ClientConnection **conns)
   write(client_fd, response, strlen(response));
 }
 
-bool communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
+bool processLine(char *line, int client_fd, struct ClientConnection **conns, int curr_cap)
 {
-  char buffer[BUFFER_SIZE];
-  char cmd[CMD_LENGTH];
-  char username[USERNAME_LENGTH];
+  char cmd[INBUF_SIZE], arg[INBUF_SIZE];
+
+  int matched = sscanf(line, "%159s %159s", cmd, arg);
+
+  if (matched < 1)
+    return false;
+
+  printf("Received from client %d: %s\n", client_fd, line);
+
+  if (strlen(cmd) > (size_t)MAX_CMD_LEN)
+    return replyError(client_fd, "Unknown command");
+
+  if (strcmp(cmd, "LOGIN") == 0 && matched == 2)
+  {
+    if (strlen(arg) > (size_t)(USERNAME_LENGTH - 1))
+      return replyError(client_fd, "Username too long");
+
+    loginUser(arg, client_fd, conns, curr_cap);
+    return false;
+  }
+
+  if (strcmp(cmd, "QUIT") == 0 && matched == 1)
+  {
+    quitUser(client_fd, conns);
+    return true;
+  }
+
+  return replyError(client_fd, "Unknown command");
+}
+
+bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
+{
+  struct ClientConnection *self = conns[client_fd];
 
   while (true)
   {
-    memset(buffer, 0, sizeof(buffer));
-
-    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
+    ssize_t bytes_read = read(client_fd, self->inbuf + self->inlen, sizeof(self->inbuf) - self->inlen);
     if (bytes_read == -1)
     {
       if (errno == EINTR)
@@ -136,29 +189,58 @@ bool communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, i
       return true;
     }
 
-    buffer[bytes_read] = '\0';
-    printf("Received from client: %s\n", buffer);
+    self->inlen += bytes_read;
 
-    int matched = sscanf(buffer, "%31s %127s", cmd, username);
+    size_t consumed = 0, search = self->scanned;
+    char *newline;
 
-    if (strcmp(cmd, "LOGIN") == 0 && matched == 2)
+    while ((newline = memchr(self->inbuf + search, '\n', self->inlen - search)) != NULL)
     {
-      loginUser(username, client_fd, conns, curr_cap);
+      char *line = self->inbuf + consumed;
+      size_t line_len = newline - line;
+
+      consumed = search = (newline - self->inbuf) + 1;
+
+      if (self->discarding)
+      {
+        self->discarding = false;
+        continue;
+      }
+
+      *newline = '\0';
+
+      if (line_len > 0 && line[line_len - 1] == '\r')
+        line[line_len - 1] = '\0';
+
+      if (processLine(line, client_fd, conns, curr_cap))
+        return true;
     }
-    else if (strcmp(cmd, "QUIT") == 0 && matched == 1)
+
+    self->inlen -= consumed;
+    memmove(self->inbuf, self->inbuf + consumed, self->inlen);
+    self->scanned = self->inlen;
+
+    if (self->inlen == sizeof(self->inbuf))
     {
-      quitUser(client_fd, conns);
-      return true;
-    }
-    else
-    {
-      write(client_fd, "Invalid command\n", 16);
+      if (!self->discarding)
+      {
+        replyError(client_fd, "Message too long");
+        self->discarding = true;
+      }
+
+      self->inlen = self->scanned = 0;
     }
   }
 }
 
 int main(int argc, char *argv[])
 {
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+  {
+    printf("Failed to ignore SIGPIPE\n");
+    return 1;
+  }
+
   int server_fd;
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);
@@ -229,16 +311,15 @@ int main(int argc, char *argv[])
 
   printf("Server socket added to epoll successfully\n");
 
-  struct epoll_event events[MIN_CAPACITY];
+  struct epoll_event events[MAX_EVENTS];
   int curr_cap = MIN_CAPACITY;
 
-  struct ClientConnection **conns;
-  conns = malloc(curr_cap * sizeof(struct ClientConnection *));
+  struct ClientConnection **conns = calloc(curr_cap, sizeof(struct ClientConnection *));
 
   while (true)
   {
     printf("Waiting for events...\n");
-    int nfds = epoll_wait(epoll_fd, events, MIN_CAPACITY, -1);
+    int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     printf("Number of events: %d\n", nfds);
     for (int i = 0; i < nfds; i++)
     {
@@ -256,6 +337,7 @@ int main(int argc, char *argv[])
             printf("Failed to accept client connection: %s\n", strerror(errno));
             break;
           }
+
           setNonBlocking(client_fd);
 
           if (client_fd >= curr_cap)
@@ -305,7 +387,7 @@ int main(int argc, char *argv[])
       else
       {
         printf("Handling communication for client %d\n", curr_fd);
-        if (communicate(curr_fd, epoll_fd, conns, curr_cap))
+        if (communicate(curr_fd, conns, curr_cap))
         {
           printf("Removing client %d from epoll and closing connection\n", curr_fd);
           removeClient(curr_fd, epoll_fd, conns, curr_cap);
