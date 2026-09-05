@@ -17,19 +17,33 @@ char buffer[BUFFER_SIZE];
 
 void communicate(int client_fd)
 {
-  int i;
   while (true)
   {
+    int i = 0;
+    int c;
+    while (i < BUFFER_SIZE - 1 && (c = getchar()) != EOF && c != '\n')
+      buffer[i++] = (char)c;
+    buffer[i] = '\0';
+
+    if (c == EOF && i == 0)
+    {
+      printf("Input closed, exiting\n");
+      close(client_fd);
+      return;
+    }
+
+    bool quitting = (strcmp(buffer, "QUIT") == 0);
+
+    if (write(client_fd, buffer, i) == -1)
+    {
+      printf("Failed to write to server\n");
+      close(client_fd);
+      return;
+    }
+
     memset(buffer, 0, sizeof(buffer));
-    i = 0;
-    while ((buffer[i++] = getchar()) != '\n' && i < BUFFER_SIZE - 1)
-      ;
 
-    write(client_fd, buffer, sizeof(buffer));
-
-    memset(buffer, 0, sizeof(buffer));
-
-    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
+    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
     if (bytes_read == -1)
     {
       printf("Failed to read from server\n");
@@ -45,6 +59,12 @@ void communicate(int client_fd)
 
     buffer[bytes_read] = '\0';
     printf("Received from server: %s\n", buffer);
+
+    if (quitting)
+    {
+      close(client_fd);
+      return;
+    }
   }
 }
 
@@ -79,5 +99,6 @@ int main(int argc, char *argv[])
   printf("Connected to server successfully\n");
 
   communicate(client_fd);
-  close(client_fd);
+
+  return 0;
 }

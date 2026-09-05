@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -107,7 +108,7 @@ void quitUser(int client_fd, struct ClientConnection **conns)
   write(client_fd, response, strlen(response));
 }
 
-void communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
+bool communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
 {
   char buffer[BUFFER_SIZE];
   char cmd[CMD_LENGTH];
@@ -120,13 +121,19 @@ void communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, i
     ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
     if (bytes_read == -1)
     {
+      if (errno == EINTR)
+        continue;
+
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return false;
+
       printf("Failed to read from client\n");
-      return;
+      return true;
     }
     else if (bytes_read == 0)
     {
       printf("Client disconnected\n");
-      return;
+      return true;
     }
 
     buffer[bytes_read] = '\0';
@@ -141,7 +148,7 @@ void communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, i
     else if (strcmp(cmd, "QUIT") == 0 && matched == 1)
     {
       quitUser(client_fd, conns);
-      return;
+      return true;
     }
     else
     {
@@ -230,7 +237,9 @@ int main(int argc, char *argv[])
 
   while (true)
   {
+    printf("Waiting for events...\n");
     int nfds = epoll_wait(epoll_fd, events, MIN_CAPACITY, -1);
+    printf("Number of events: %d\n", nfds);
     for (int i = 0; i < nfds; i++)
     {
       int curr_fd = events[i].data.fd;
@@ -238,12 +247,15 @@ int main(int argc, char *argv[])
       {
         while (true)
         {
+          printf("Accepting new client connection...\n");
           struct sockaddr_in caddr;
           socklen_t caddr_len = sizeof(caddr);
           int client_fd = accept(server_fd, (struct sockaddr *)&caddr, &caddr_len);
           if (client_fd == -1)
+          {
+            printf("Failed to accept client connection: %s\n", strerror(errno));
             break;
-
+          }
           setNonBlocking(client_fd);
 
           if (client_fd >= curr_cap)
@@ -251,6 +263,8 @@ int main(int argc, char *argv[])
             int new_cap = curr_cap;
             while (client_fd >= new_cap)
               new_cap *= 2;
+
+            printf("Growing connection table from %d to %d\n", curr_cap, new_cap);
 
             struct ClientConnection **new_conns = realloc(conns, new_cap * sizeof(struct ClientConnection *));
             if (new_conns == NULL)
@@ -290,8 +304,12 @@ int main(int argc, char *argv[])
       }
       else
       {
-        communicate(curr_fd, epoll_fd, conns, curr_cap);
-        removeClient(curr_fd, epoll_fd, conns, curr_cap);
+        printf("Handling communication for client %d\n", curr_fd);
+        if (communicate(curr_fd, epoll_fd, conns, curr_cap))
+        {
+          printf("Removing client %d from epoll and closing connection\n", curr_fd);
+          removeClient(curr_fd, epoll_fd, conns, curr_cap);
+        }
       }
     }
   }
