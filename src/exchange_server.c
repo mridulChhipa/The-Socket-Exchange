@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 
-#define PORT 8080
+#define DEFAULT_PORT 8080
 #define BUFFER_SIZE 1024
 #define CMD_LENGTH 32
 #define USERNAME_LENGTH 128
@@ -90,22 +90,23 @@ void loginUser(const char *username, int client_fd, struct ClientConnection **co
   write(client_fd, response, strlen(response));
 }
 
+// QUIT is a graceful disconnect available to both client types and needs no
+// login, so it always succeeds. We leave logged_in alone: removeClient still
+// needs it to name the user in the disconnect log.
 void quitUser(int client_fd, struct ClientConnection **conns)
 {
   struct ClientConnection *self = conns[client_fd];
 
-  if (!self->logged_in)
-  {
-    const char *response = "ERROR Not logged in\n";
-    write(client_fd, response, strlen(response));
-    return;
-  }
-
-  printf("User %s logged out\n", self->username);
-  self->logged_in = false;
+  if (self->logged_in)
+    printf("User %s logged out\n", self->username);
 
   const char *response = "OK\n";
   write(client_fd, response, strlen(response));
+
+  // Half-close: flush our side and send FIN, so the client sees an orderly
+  // termination before we tear the socket down.
+  if (shutdown(client_fd, SHUT_WR) == -1)
+    printf("Failed to shut down write side of client socket\n");
 }
 
 bool communicate(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
@@ -163,6 +164,41 @@ int main(int argc, char *argv[])
   struct sockaddr_in server_addr;
   socklen_t server_addr_len = sizeof(server_addr);
 
+  // Usage: exchange_server [bind-address] [port]
+  // The experiment script picks the port, so both must come from the command
+  // line; the previous hardcoded values remain the defaults.
+  in_addr_t bind_addr = INADDR_ANY;
+  int port = DEFAULT_PORT;
+
+  if (argc > 3)
+  {
+    printf("Usage: %s [bind-address] [port]\n", argv[0]);
+    return 1;
+  }
+
+  if (argc >= 2)
+  {
+    struct in_addr parsed;
+    if (inet_pton(AF_INET, argv[1], &parsed) != 1)
+    {
+      printf("Invalid bind address: %s\n", argv[1]);
+      return 1;
+    }
+    bind_addr = parsed.s_addr;
+  }
+
+  if (argc >= 3)
+  {
+    char *end;
+    long parsed = strtol(argv[2], &end, 10);
+    if (*argv[2] == '\0' || *end != '\0' || parsed < 1 || parsed > 65535)
+    {
+      printf("Invalid port: %s\n", argv[2]);
+      return 1;
+    }
+    port = (int)parsed;
+  }
+
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
   if (server_fd == -1)
@@ -176,8 +212,8 @@ int main(int argc, char *argv[])
   memset(&server_addr, 0, sizeof(server_addr));
 
   server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(PORT);
+  server_addr.sin_addr.s_addr = bind_addr;
+  server_addr.sin_port = htons((uint16_t)port);
 
   int opt = 1;
   if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
@@ -204,7 +240,7 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Listening on port %d\n", PORT);
+  printf("Listening on port %d\n", port);
 
   // From here we can set up epoll to handle multiple client connections efficiently.
 
@@ -233,7 +269,12 @@ int main(int argc, char *argv[])
   int curr_cap = MIN_CAPACITY;
 
   struct ClientConnection **conns;
-  conns = malloc(curr_cap * sizeof(struct ClientConnection *));
+  conns = calloc(curr_cap, sizeof(struct ClientConnection *));
+  if (conns == NULL)
+  {
+    printf("Failed to allocate connection table\n");
+    return 1;
+  }
 
   while (true)
   {
