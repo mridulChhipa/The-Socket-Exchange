@@ -78,8 +78,6 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Socket created successfully\n");
-
   memset(&server_addr, 0, sizeof(server_addr));
 
   server_addr.sin_family = AF_INET;
@@ -102,15 +100,11 @@ int main(int argc, char *argv[])
 
   setNonBlocking(server_fd);
 
-  printf("Socket options set successfully\n");
-
   if (bind(server_fd, (struct sockaddr *)&server_addr, server_addr_len) == -1)
   {
     printf("Failed to bind socket\n");
     return 1;
   }
-
-  printf("Socket bound successfully\n");
 
   if (listen(server_fd, SOMAXCONN) == -1)
   {
@@ -132,8 +126,6 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Kqueue instance created successfully\n");
-
   struct kevent kev;
   EV_SET(&kev, server_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
@@ -142,8 +134,6 @@ int main(int argc, char *argv[])
     printf("Failed to add server socket to kqueue\n");
     return 1;
   }
-
-  printf("Server socket added to kqueue successfully\n");
 
   struct kevent events[MAX_EVENTS];
   int curr_cap = MIN_CAPACITY;
@@ -158,7 +148,6 @@ int main(int argc, char *argv[])
 
   while (running)
   {
-    printf("Waiting for events...\n");
     int nfds = kevent(kq, NULL, 0, events, MAX_EVENTS, NULL);
 
     if (nfds == -1)
@@ -170,7 +159,6 @@ int main(int argc, char *argv[])
       break;
     }
 
-    printf("Number of events: %d\n", nfds);
     for (int i = 0; i < nfds; i++)
     {
       int curr_fd = (int)events[i].ident;

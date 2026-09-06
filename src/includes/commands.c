@@ -60,8 +60,6 @@ bool subscribeClient(const char *instrument, struct ClientConnection *self)
 
   self->type = market;
 
-  printf("Data client subscribed to %s from %s:%d\n", instrument, inet_ntoa(self->caddr.sin_addr), ntohs(self->caddr.sin_port));
-
   return sendLine(self, "OK\n");
 }
 
@@ -93,8 +91,6 @@ bool unsubscribeClient(const char *instrument, struct ClientConnection *self)
   {
     return replyError(self, "Invalid instrument");
   }
-
-  printf("Data client unsubscribed from %s at %s:%d\n", instrument, inet_ntoa(self->caddr.sin_addr), ntohs(self->caddr.sin_port));
 
   return sendLine(self, "OK\n");
 }

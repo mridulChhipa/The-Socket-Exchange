@@ -58,7 +58,7 @@ void drainResponses(void)
     if (newline > line && newline[-1] == '\r')
       newline[-1] = '\0';
 
-    printf("Received from server: %s\n", line);
+    printf("%s\n", line);
 
     line = newline + 1;
   }
@@ -213,8 +213,6 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Socket created successfully\n");
-
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(port);
@@ -234,10 +232,6 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  printf("Connected to server successfully\n");
-
-  // A username on the command line means log in straight away, so the caller
-  // does not have to feed a LOGIN line in on stdin.
   if (username != NULL)
   {
     char login[BUFFER_SIZE];

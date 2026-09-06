@@ -137,7 +137,7 @@ bool processLine(char *line, struct ClientConnection *conn, struct ClientConnect
   if (matched < 1)
     return false;
 
-  printf("Received from client %d: %s\n", conn->client_fd, line);
+  printf("%d: %s\n", conn->client_fd, line);
 
   if (strlen(cmd) > MAX_CMD_LEN)
     return replyError(conn, "Unknown command");
@@ -197,7 +197,6 @@ bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap, s
     }
     else if (bytes_read == 0)
     {
-      printf("Client disconnected\n");
       return true;
     }
 

@@ -34,8 +34,6 @@ bool growConns(struct ClientConnection ***conns, int *curr_cap, int client_fd)
   while (client_fd >= new_cap)
     new_cap *= 2;
 
-  printf("Growing connection table from %d to %d\n", *curr_cap, new_cap);
-
   struct ClientConnection **new_conns = realloc(*conns, new_cap * sizeof(struct ClientConnection *));
   if (new_conns == NULL)
   {
@@ -92,8 +90,6 @@ bool registerClient(int client_fd, int kq, struct ClientConnection **conns, cons
 
     return false;
   }
-
-  printf("Client connected: %s:%d\n", inet_ntoa(caddr->sin_addr), ntohs(caddr->sin_port));
 
   return true;
 }
@@ -163,7 +159,6 @@ void handleClientEvent(const struct kevent *ev, int kq, struct ClientConnection 
 
   if (done)
   {
-    printf("Removing client %d from kqueue and closing connection\n", client_fd);
     removeClient(client_fd, kq, conns, curr_cap, orderbook);
   }
 }
