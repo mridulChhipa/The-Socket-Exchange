@@ -11,7 +11,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
+#include <sys/event.h>
+#include <sys/time.h>
 
 #include "orderbook.h"
 
@@ -21,8 +22,8 @@
 #include "io.h"
 
 /*
-Cleared by SIGINT/SIGTERM. epoll_wait is never restarted after a signal, so
-the loop always gets a chance to notice this.
+Cleared by SIGINT/SIGTERM. kevent is never restarted after a signal, so the
+loop always gets a chance to notice this.
 */
 static volatile sig_atomic_t running = 1;
 
@@ -119,30 +120,32 @@ int main(int argc, char *argv[])
 
   printf("Listening on %s:%d\n", host ? host : "0.0.0.0", port);
 
-  // From here we can set up epoll to handle multiple client connections efficiently.
+  struct LimitOrderBook orderbook;
+  initOrderbook(&orderbook);
 
-  int epoll_fd = epoll_create1(0);
-  if (epoll_fd == -1)
+  // From here we can set up kqueue to handle multiple client connections efficiently.
+
+  int kq = kqueue();
+  if (kq == -1)
   {
-    printf("Failed to create epoll instance\n");
+    printf("Failed to create kqueue instance\n");
     return 1;
   }
 
-  printf("Epoll instance created successfully\n");
+  printf("Kqueue instance created successfully\n");
 
-  struct epoll_event kev;
-  kev.events = EPOLLIN;
-  kev.data.fd = server_fd;
+  struct kevent kev;
+  EV_SET(&kev, server_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &kev) == -1)
+  if (kevent(kq, &kev, 1, NULL, 0, NULL) == -1)
   {
-    printf("Failed to add server socket to epoll\n");
+    printf("Failed to add server socket to kqueue\n");
     return 1;
   }
 
-  printf("Server socket added to epoll successfully\n");
+  printf("Server socket added to kqueue successfully\n");
 
-  struct epoll_event events[MAX_EVENTS];
+  struct kevent events[MAX_EVENTS];
   int curr_cap = MIN_CAPACITY;
 
   struct ClientConnection **conns = calloc(curr_cap, sizeof(struct ClientConnection *));
@@ -156,7 +159,7 @@ int main(int argc, char *argv[])
   while (running)
   {
     printf("Waiting for events...\n");
-    int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+    int nfds = kevent(kq, NULL, 0, events, MAX_EVENTS, NULL);
 
     if (nfds == -1)
     {
@@ -170,14 +173,14 @@ int main(int argc, char *argv[])
     printf("Number of events: %d\n", nfds);
     for (int i = 0; i < nfds; i++)
     {
-      int curr_fd = events[i].data.fd;
+      int curr_fd = (int)events[i].ident;
       if (curr_fd == server_fd)
       {
-        acceptClients(server_fd, epoll_fd, &conns, &curr_cap);
+        acceptClients(server_fd, kq, &conns, &curr_cap);
       }
       else
       {
-        handleClientEvent(curr_fd, events[i].events, epoll_fd, conns, curr_cap);
+        handleClientEvent(&events[i], kq, conns, curr_cap, &orderbook);
       }
     }
   }
@@ -187,13 +190,13 @@ int main(int argc, char *argv[])
   for (int i = 0; i < curr_cap; i++)
   {
     if (conns[i] != NULL)
-      removeClient(i, epoll_fd, conns, curr_cap);
+      removeClient(i, kq, conns, curr_cap);
   }
 
   free(conns);
 
   close(server_fd);
-  close(epoll_fd);
+  close(kq);
 
   printf("Exchange server closed successfully\n");
 

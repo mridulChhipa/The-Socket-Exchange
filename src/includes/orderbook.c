@@ -102,10 +102,12 @@ static struct Order **oppList(struct LimitOrderBook *book, struct Order *ord)
     }
 }
 
-void addOrder(struct LimitOrderBook *book, struct Order *ord)
+int addOrder(struct LimitOrderBook *book, struct Order *ord, struct Fill *fills, int max_fills)
 {
     struct Order **own = ownList(book, ord);
     struct Order **opp = oppList(book, ord);
+
+    int count = 0;
 
     struct Order *cur = *opp;
     while (cur != NULL && ord->quantity > 0)
@@ -123,6 +125,26 @@ void addOrder(struct LimitOrderBook *book, struct Order *ord)
             cur->quantity -= qty;
             ord->quantity -= qty;
 
+            if (count < max_fills)
+            {
+                fills[count].price = cur->price;
+                fills[count].quantity = qty;
+                fills[count].instrument = ord->instrument;
+
+                if (ord->type == BUY)
+                {
+                    fills[count].buy_client_fd = ord->client_fd;
+                    fills[count].sell_client_fd = cur->client_fd;
+                }
+                else
+                {
+                    fills[count].buy_client_fd = cur->client_fd;
+                    fills[count].sell_client_fd = ord->client_fd;
+                }
+            }
+
+            count++;
+
             if (cur->quantity == 0)
             {
                 removeNode(opp, cur);
@@ -137,15 +159,17 @@ void addOrder(struct LimitOrderBook *book, struct Order *ord)
         append(own, ord);
     else
         free(ord);
+
+    return count;
 }
 
-static int cancelIn(struct Order **head, int id)
+static int cancelIn(struct Order **head, int id, int client_fd)
 {
     struct Order *cur = *head;
 
     while (cur != NULL)
     {
-        if (cur->id == id)
+        if (cur->id == id && cur->client_fd == client_fd)
         {
             removeNode(head, cur);
             free(cur);
@@ -158,15 +182,15 @@ static int cancelIn(struct Order **head, int id)
     return 0;
 }
 
-int cancelOrder(struct LimitOrderBook *book, int id)
+int cancelOrder(struct LimitOrderBook *book, int id, int client_fd)
 {
-    if (cancelIn(&book->jnst_buy_orders, id))
+    if (cancelIn(&book->jnst_buy_orders, id, client_fd))
         return 1;
-    if (cancelIn(&book->jnst_sell_orders, id))
+    if (cancelIn(&book->jnst_sell_orders, id, client_fd))
         return 1;
-    if (cancelIn(&book->imct_buy_orders, id))
+    if (cancelIn(&book->imct_buy_orders, id, client_fd))
         return 1;
-    if (cancelIn(&book->imct_sell_orders, id))
+    if (cancelIn(&book->imct_sell_orders, id, client_fd))
         return 1;
 
     return 0;

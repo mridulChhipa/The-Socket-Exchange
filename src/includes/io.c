@@ -6,7 +6,8 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
+#include <sys/event.h>
+#include <sys/time.h>
 
 #include "io.h"
 #include "commands.h"
@@ -87,11 +88,20 @@ bool replyError(struct ClientConnection *conn, const char *reason)
   return sendLine(conn, response);
 }
 
-void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, int curr_cap)
+void removeClient(int client_fd, int kq, struct ClientConnection **conns, int curr_cap)
 {
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL) == -1)
+  /*
+  Closing the fd would drop both filters on its own, but they are removed first
+  so a failure to deregister is still visible. ENOENT is expected and ignored:
+  registerClient may have failed partway, and either filter can already be gone.
+  */
+  struct kevent kev[2];
+  EV_SET(&kev[0], client_fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+  EV_SET(&kev[1], client_fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+
+  if (kevent(kq, kev, 2, NULL, 0, NULL) == -1 && errno != ENOENT)
   {
-    printf("Failed to remove client socket from epoll\n");
+    printf("Failed to remove client socket from kqueue: %s\n", strerror(errno));
   }
 
   if (client_fd < curr_cap && conns[client_fd] != NULL)
@@ -114,7 +124,7 @@ void removeClient(int client_fd, int epoll_fd, struct ClientConnection **conns, 
   close(client_fd);
 }
 
-bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap)
+bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook)
 {
   char cmd[INBUF_SIZE], arg[INBUF_SIZE];
 
@@ -148,7 +158,7 @@ bool processLine(char *line, struct ClientConnection *conn, struct ClientConnect
   return replyError(conn, "Unknown command");
 }
 
-bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
+bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook)
 {
   struct ClientConnection *self = conns[client_fd];
 
@@ -198,7 +208,7 @@ bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap)
       if (line_len > 0 && line[line_len - 1] == '\r')
         line[line_len - 1] = '\0';
 
-      if (processLine(line, self, conns, curr_cap))
+      if (processLine(line, self, conns, curr_cap, orderbook))
         return true;
 
       if (self->closing)

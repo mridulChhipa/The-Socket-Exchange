@@ -7,9 +7,11 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
+#include <sys/event.h>
+#include <sys/time.h>
 
 #include "config.h"
+#include "orderbook.h"
 
 enum Type
 {
@@ -39,12 +41,17 @@ struct ClientConnection
 
 void setNonBlocking(int fd);
 
-void acceptClients(int server_fd, int epoll_fd, struct ClientConnection ***conns, int *curr_cap);
+void acceptClients(int server_fd, int kq, struct ClientConnection ***conns, int *curr_cap);
 
 bool growConns(struct ClientConnection ***conns, int *curr_cap, int client_fd);
 
-bool registerClient(int client_fd, int epoll_fd, struct ClientConnection **conns, const struct sockaddr_in *caddr, socklen_t caddr_len);
+bool registerClient(int client_fd, int kq, struct ClientConnection **conns, const struct sockaddr_in *caddr, socklen_t caddr_len);
 
-void handleClientEvent(int client_fd, uint32_t revents, int epoll_fd, struct ClientConnection **conns, int curr_cap);
+/*
+Takes the whole kevent rather than a flag word: kqueue splits readability and
+writability into separate filters, so which filter fired is as much a part of
+the event as the flags are.
+*/
+void handleClientEvent(const struct kevent *ev, int kq, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook);
 
 #endif

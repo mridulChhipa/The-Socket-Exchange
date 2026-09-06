@@ -7,8 +7,10 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
+#include <sys/event.h>
+#include <sys/time.h>
 
+#include "orderbook.h"
 #include "server.h"
 #include "config.h"
 #include "io.h"
@@ -51,11 +53,11 @@ bool growConns(struct ClientConnection ***conns, int *curr_cap, int client_fd)
 }
 
 /*
-Allocates the connection state for an accepted socket and arms it on epoll.
+Allocates the connection state for an accepted socket and arms it on the kqueue.
 On failure the slot is left NULL and client_fd is closed here, since the
 half-registered fd is not the caller's to clean up.
 */
-bool registerClient(int client_fd, int epoll_fd, struct ClientConnection **conns, const struct sockaddr_in *caddr, socklen_t caddr_len)
+bool registerClient(int client_fd, int kq, struct ClientConnection **conns, const struct sockaddr_in *caddr, socklen_t caddr_len)
 {
   conns[client_fd] = calloc(1, sizeof(struct ClientConnection));
 
@@ -71,13 +73,18 @@ bool registerClient(int client_fd, int epoll_fd, struct ClientConnection **conns
   conns[client_fd]->caddr = *caddr;
   conns[client_fd]->caddr_len = caddr_len;
 
-  struct epoll_event kev;
-  kev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-  kev.data.fd = client_fd;
+  /*
+  kqueue keeps readability and writability in separate filters, so both are
+  armed here. EV_CLEAR makes them edge-triggered: a filter reports once per
+  transition and stays quiet until the socket changes state again.
+  */
+  struct kevent kev[2];
+  EV_SET(&kev[0], client_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  EV_SET(&kev[1], client_fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
 
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &kev) == -1)
+  if (kevent(kq, kev, 2, NULL, 0, NULL) == -1)
   {
-    printf("Failed to add client socket to epoll\n");
+    printf("Failed to add client socket to kqueue\n");
 
     free(conns[client_fd]);
     conns[client_fd] = NULL;
@@ -91,7 +98,7 @@ bool registerClient(int client_fd, int epoll_fd, struct ClientConnection **conns
   return true;
 }
 
-void acceptClients(int server_fd, int epoll_fd, struct ClientConnection ***conns, int *curr_cap)
+void acceptClients(int server_fd, int kq, struct ClientConnection ***conns, int *curr_cap)
 {
   while (true)
   {
@@ -121,27 +128,42 @@ void acceptClients(int server_fd, int epoll_fd, struct ClientConnection ***conns
       continue;
     }
 
-    registerClient(client_fd, epoll_fd, *conns, &caddr, caddr_len);
+    registerClient(client_fd, kq, *conns, &caddr, caddr_len);
   }
 }
 
-void handleClientEvent(int client_fd, uint32_t revents, int epoll_fd, struct ClientConnection **conns, int curr_cap)
+void handleClientEvent(const struct kevent *ev, int kq, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook)
 {
+  int client_fd = (int)ev->ident;
+
+  /*
+  Read and write arrive as two separate events for the same socket, so this can
+  be called twice per loop pass for one client. The second call must tolerate
+  the first having already torn the connection down.
+  */
   if (client_fd >= curr_cap || conns[client_fd] == NULL)
     return;
 
   struct ClientConnection *conn = conns[client_fd];
-  bool done = (revents & (EPOLLERR | EPOLLHUP)) != 0;
 
-  if (!done && (revents & EPOLLOUT))
+  /*
+  EV_ERROR means the registration or the socket itself failed, with the errno in
+  fflags. EV_EOF on the write filter is a full disconnect, but on the read filter
+  it only says the peer sent FIN: the data before it is still queued, so that case
+  falls through to communicate(), which drains it and reports the EOF as a zero
+  length read.
+  */
+  bool done = (ev->flags & EV_ERROR) != 0 || (ev->filter == EVFILT_WRITE && (ev->flags & EV_EOF) != 0);
+
+  if (!done && ev->filter == EVFILT_WRITE)
     done = flushToClient(conn);
 
-  if (!done && (revents & EPOLLIN))
-    done = communicate(client_fd, conns, curr_cap);
+  if (!done && ev->filter == EVFILT_READ)
+    done = communicate(client_fd, conns, curr_cap, orderbook);
 
   if (done)
   {
-    printf("Removing client %d from epoll and closing connection\n", client_fd);
-    removeClient(client_fd, epoll_fd, conns, curr_cap);
+    printf("Removing client %d from kqueue and closing connection\n", client_fd);
+    removeClient(client_fd, kq, conns, curr_cap);
   }
 }

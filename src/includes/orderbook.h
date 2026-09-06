@@ -23,6 +23,17 @@ struct Order
     } instrument; // 0 for jnst and 1 for imct
 };
 
+struct Fill
+{
+    int price;
+    int quantity;
+    int buy_client_fd;
+    int sell_client_fd;
+    enum Instrument instrument;
+};
+
+#define MAX_FILLS 64
+
 struct LimitOrderBook
 {
     struct Order *jnst_buy_orders;
@@ -32,7 +43,9 @@ struct LimitOrderBook
 };
 
 void initOrderbook(struct LimitOrderBook *book);
-void addOrder(struct LimitOrderBook *book, struct Order *new_order);
-int cancelOrder(struct LimitOrderBook *book, int order_id);
+
+int addOrder(struct LimitOrderBook *book, struct Order *new_order, struct Fill *fills, int max_fills);
+
+int cancelOrder(struct LimitOrderBook *book, int order_id, int client_fd);
 
 #endif
