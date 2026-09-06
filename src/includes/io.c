@@ -88,8 +88,11 @@ bool replyError(struct ClientConnection *conn, const char *reason)
   return sendLine(conn, response);
 }
 
-void removeClient(int client_fd, int kq, struct ClientConnection **conns, int curr_cap)
+void removeClient(int client_fd, int kq, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook)
 {
+  // The client's resting orders stay in the book, just without an owner.
+  detachClientOrders(orderbook, client_fd);
+
   /*
   Closing the fd would drop both filters on its own, but they are removed first
   so a failure to deregister is still visible. ENOENT is expected and ignored:
@@ -127,8 +130,9 @@ void removeClient(int client_fd, int kq, struct ClientConnection **conns, int cu
 bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook)
 {
   char cmd[INBUF_SIZE], arg[INBUF_SIZE];
+  int quantity, price;
 
-  int matched = sscanf(line, "%159s %159s", cmd, arg);
+  int matched = sscanf(line, "%159s %159s %d %d", cmd, arg, &quantity, &price);
 
   if (matched < 1)
     return false;
@@ -154,6 +158,18 @@ bool processLine(char *line, struct ClientConnection *conn, struct ClientConnect
 
   if (strcmp(cmd, "UNSUBSCRIBE") == 0 && matched == 2)
     return unsubscribeClient(arg, conn);
+
+  // Orderbook commands are only available to logged-in clients
+  if (!conn->logged_in)
+    return replyError(conn, "Not logged in");
+
+  if (strcmp(cmd, "BUY") == 0 && matched == 4)
+    return placeOrder(BUY, arg, quantity, price, conn, conns, curr_cap, orderbook);
+  if (strcmp(cmd, "SELL") == 0 && matched == 4)
+    return placeOrder(SELL, arg, quantity, price, conn, conns, curr_cap, orderbook);
+
+  if (strcmp(cmd, "CANCEL") == 0 && matched == 2)
+    return cancelUserOrder(arg, conn, orderbook);
 
   return replyError(conn, "Unknown command");
 }

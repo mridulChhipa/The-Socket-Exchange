@@ -12,7 +12,7 @@ bool sendToClient(struct ClientConnection *conn, const char *data, size_t len);
 bool sendLine(struct ClientConnection *conn, const char *line);
 
 bool replyError(struct ClientConnection *conn, const char *reason);
-void removeClient(int client_fd, int kq, struct ClientConnection **conns, int curr_cap);
+void removeClient(int client_fd, int kq, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook);
 bool processLine(char *line, struct ClientConnection *conn, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook);
 bool communicate(int client_fd, struct ClientConnection **conns, int curr_cap, struct LimitOrderBook *orderbook);
 

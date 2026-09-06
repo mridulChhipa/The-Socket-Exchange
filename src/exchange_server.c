@@ -190,7 +190,7 @@ int main(int argc, char *argv[])
   for (int i = 0; i < curr_cap; i++)
   {
     if (conns[i] != NULL)
-      removeClient(i, kq, conns, curr_cap);
+      removeClient(i, kq, conns, curr_cap, &orderbook);
   }
 
   free(conns);

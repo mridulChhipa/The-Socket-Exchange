@@ -32,8 +32,6 @@ struct Fill
     enum Instrument instrument;
 };
 
-#define MAX_FILLS 64
-
 struct LimitOrderBook
 {
     struct Order *jnst_buy_orders;
@@ -44,7 +42,20 @@ struct LimitOrderBook
 
 void initOrderbook(struct LimitOrderBook *book);
 
-int addOrder(struct LimitOrderBook *book, struct Order *new_order, struct Fill *fills, int max_fills);
+/*
+Returns how many executions occurred and points *fills at them. The caller owns
+that array and must free it. Takes ownership of new_order either way: it is
+linked into the book or freed.
+*/
+int addOrder(struct LimitOrderBook *book, struct Order *new_order, struct Fill **fills);
+
+/*
+Leaves a departed client's orders resting but marks them ownerless, so fills
+against them notify nobody and nobody can cancel them. Descriptors are reused,
+so an order still naming a closed fd would otherwise be inherited by whichever
+client the OS hands that number to next.
+*/
+void detachClientOrders(struct LimitOrderBook *book, int client_fd);
 
 int cancelOrder(struct LimitOrderBook *book, int order_id, int client_fd);
 

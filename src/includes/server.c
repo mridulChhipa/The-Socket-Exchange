@@ -164,6 +164,6 @@ void handleClientEvent(const struct kevent *ev, int kq, struct ClientConnection 
   if (done)
   {
     printf("Removing client %d from kqueue and closing connection\n", client_fd);
-    removeClient(client_fd, kq, conns, curr_cap);
+    removeClient(client_fd, kq, conns, curr_cap, orderbook);
   }
 }
