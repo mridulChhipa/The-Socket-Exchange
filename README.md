@@ -178,3 +178,97 @@ idle connections hold roughly 11 MB of input buffers rather than about 72 MB. No
 kernel socket buffers dominate per-connection memory at that scale; the line buffer is
 the portion the application controls, which makes it worth measuring both ways in the
 scalability experiment.
+
+## Bonus (Section 6.9) — running the scalability experiment
+
+The two helper programs required by the bonus live in `bonus/`:
+
+- `bonus/idle_clients.py` — client-generation program. Opens N TCP connections to
+  the Exchange Server and holds them ESTABLISHED without exchanging any application
+  data. Prints progress and a summary of failures.
+- `bonus/measure.sh` — one-shot snapshot of the server's resource usage (RSS, %CPU,
+  FDs, mbuf clusters, socket-buffer sysctls, kernel stack). Meant to be run while
+  `idle_clients.py` is holding the connections open.
+
+Full tuning recipe, per-N raw outputs, and the analysis are in `bonus/README.md`
+and in the report appendix. Below are only the commands needed to reproduce the
+runs.
+
+### Prerequisite: OS tuning (once, as root on FreeBSD 14)
+
+`bonus/README.md` §3–§5 has the full explanation. In brief, before the first run:
+
+```sh
+# 1. Boot-time tunables (edit /boot/loader.conf, then reboot):
+#      kern.ipc.maxsockets=400000
+#      kern.ipc.nmbclusters=500000
+
+# 2. Runtime sysctls (persist in /etc/sysctl.conf; apply live with):
+sysctl kern.ipc.somaxconn=65535
+sysctl kern.maxfiles=300000 kern.maxfilesperproc=250000
+sysctl net.inet.ip.portrange.first=10000 net.inet.ip.portrange.last=65535
+
+# 3. Extra loopback addresses (only needed for N > 55 000):
+ifconfig lo0 alias 127.0.0.2/32
+ifconfig lo0 alias 127.0.0.3/32
+ifconfig lo0 alias 127.0.0.4/32
+
+# 4. In every shell that launches the server or the generator:
+ulimit -n 250000
+```
+
+### Running the experiment (three terminals)
+
+**Terminal 1 — server:**
+
+```sh
+ulimit -n 250000
+./server/run-server 127.0.0.1 5000
+```
+
+**Terminal 2 — client generator** (from the submission root):
+
+```sh
+ulimit -n 250000
+
+# 10 000 / 20 000 / 30 000 / 40 000 / 50 000: single source IP is enough.
+python3 bonus/idle_clients.py 127.0.0.1 5000 10000 --batch 2000
+python3 bonus/idle_clients.py 127.0.0.1 5000 50000 --batch 2000
+
+# 60 000 / 70 000: rotate across four 127.x.x.x source IPs to bypass the
+# ~55 000 single-source-IP ephemeral-port ceiling (TCP 4-tuple limit).
+python3 bonus/idle_clients.py 127.0.0.1 5000 70000 --batch 2000 \
+        --src-cidr 127.0.0.0/8 --src-count 4
+```
+
+Leave the generator running; it holds every socket open until you Ctrl-C it.
+
+**Terminal 3 — measurement snapshot** (run while Terminal 2 is holding connections):
+
+```sh
+SPID=$(pgrep -f exchange_server | head -1)   # or read it from Terminal 1's log
+./bonus/measure.sh $SPID 5000 | tee run_70k.txt
+```
+
+Repeat for each N; save each output as `run_<N>.txt`. That single file supplies
+every column of the Section 6.9 table (RSS/CPU from `ps`, server FDs from
+`procstat -f`, system-wide FDs from `sysctl kern.openfiles`, socket-buffer usage
+from `netstat -m`, established count cross-checked via `sockstat`, and the
+kernel stack of the server thread from `procstat -k`).
+
+### `idle_clients.py` command-line reference
+
+```
+python3 bonus/idle_clients.py <host> <port> <n> [options]
+
+  --batch B        progress log every B successful connects (default 500)
+  --sleep S        sleep S seconds between connects (default 0)
+  --report-sec T   liveness report every T seconds after all connects done (default 30)
+  --no-raise-fd    do not attempt to raise RLIMIT_NOFILE
+  --src-ips IPS    comma-separated source IPs to round-robin over
+  --src-cidr CIDR  CIDR to auto-generate the source-IP pool (e.g. 127.0.0.0/8)
+  --src-count K    how many IPs to draw from --src-cidr (default 4)
+```
+
+Default behaviour (no `--src-*` flags) is a single-source-IP client; the
+`--src-*` flags are additive and used only for `N > 55 000`.

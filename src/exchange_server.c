@@ -105,8 +105,15 @@ int main(int argc, char *argv[])
     printf("Failed to bind socket\n");
     return 1;
   }
-
-  if (listen(server_fd, SOMAXCONN) == -1)
+  /*
+  The C header macro SOMAXCONN is 128 on FreeBSD 14, which caps the syncache
+  regardless of the kern.ipc.somaxconn sysctl (65535). Under a sustained SYN
+  flood (the scalability experiment, Section 6.9) that small backlog was
+  overflowing during scheduler jitter and producing transient RSTs. Passing
+  the sysctl-allowed maximum avoids that; the kernel clamps it to
+  kern.ipc.somaxconn anyway, so this is safe on any FreeBSD.
+  */
+  if (listen(server_fd, 65535) == -1)
   {
     printf("Failed to listen on socket\n");
     return 1;
