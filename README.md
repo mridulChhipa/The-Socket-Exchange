@@ -1,5 +1,7 @@
 # Assignment 2: The Socket Exchange
 
+Repository: [https://github.com/mridulChhipa/The-Socket-Exchange](https://github.com/mridulChhipa/The-Socket-Exchange)
+
 ## Team
 
 - Student 1: `Mridul Chhipa (2024CS10411)`
@@ -14,9 +16,11 @@ text messages.
 ## Requirements
 
 - Operating system: FreeBSD 14.4-RELEASE or later
-- Language: C
-- Compiler: `<compiler and version>`
-- Runtime/dependencies: `<list any required packages or write "None">`
+- Language: C (C11)
+- Compiler: `clang` 18.1.5 (FreeBSD base system default; invoked via `cc` from the `Makefile`)
+- Build tool: `make` (BSD make; also works with GNU make)
+- Runtime/dependencies for the server and clients: none beyond libc
+- For the bonus scripts (§ Bonus): `python3` (3.9 or later) and standard FreeBSD userland tools (`netstat`, `procstat`, `ps`, `sysctl`, `sockstat`, `ifconfig`)
 
 The server and clients use the POSIX socket API directly. No third-party networking
 frameworks are required.
@@ -80,6 +84,17 @@ interface on port 8080, and the clients connect to `127.0.0.1:8080`. If a
 Trader Client is given a username it sends `LOGIN <username>` on connecting;
 otherwise commands are read from standard input, one per line.
 
+## Configuration
+
+No configuration file is required. All tunables are compile-time constants in
+`src/includes/config.h` (default port `8080`, `MAX_LINE_LEN=140`, `USERNAME_LENGTH=128`,
+`MIN_CAPACITY=10` for the connection table). Change and re-`make` to override.
+
+Command-line arguments (host, port, username, instrument) are the only runtime
+configuration for the server and clients. For the bonus scalability experiment,
+the OS tuning shown in the § Bonus section below must be applied once as root
+before the first run.
+
 ## Test
 
 With the server running:
@@ -109,7 +124,11 @@ The listening socket is level-triggered; client sockets are edge-triggered, so e
 readable socket is drained until `EAGAIN`.
 - Message-framing approach: a fixed per-connection line buffer sized from the protocol.
 See *Bounded-line message framing* below.
-- Order-book/matching approach: `<briefly describe>`
+- Order-book/matching approach: two singly-linked FIFO queues per instrument (bids
+sorted high-to-low, asks low-to-high, ties broken by arrival order). A new order
+walks the opposite side until price no longer crosses or the incoming quantity is
+exhausted; each fill emits `EXECUTED` to the two counterparties and a `TRADE` line
+to every subscriber of that instrument.
 - Connection-error handling: `SIGPIPE` is ignored process-wide, so a client that
 disappears mid-write fails the `write()` with `EPIPE` instead of terminating the
 server. A connection is reaped when `read()` returns 0 (peer sent FIN) or fails with
@@ -203,34 +222,59 @@ data. Prints progress and a summary of failures.
 FDs, mbuf clusters, socket-buffer sysctls, kernel stack). Meant to be run while
 `idle_clients.py` is holding the connections open.
 
-Full tuning recipe, per-N raw outputs, and the analysis are in `src/bonus/README.md`
-and in the report appendix. Below are only the commands needed to reproduce the
-runs.
+The full tuning rationale and per-N analysis are in the report appendix
+(Appendix A of `report.pdf`). Everything needed to actually reproduce the runs
+is written out below.
 
 ### Prerequisite: OS tuning (once, as root on FreeBSD 14)
 
-`src/bonus/README.md` §3–§5 has the full explanation. In brief, before the first run:
+FreeBSD defaults (~64 k sockets, ~29 k FDs per process, `SOMAXCONN`=128)
+cannot support 70 k connections. Apply the following once before the first
+run (justification for each value is in the report appendix, Table A.1):
 
 ```sh
-# 1. Boot-time tunables (edit /boot/loader.conf, then reboot):
-#      kern.ipc.maxsockets=400000
-#      kern.ipc.nmbclusters=500000
+# 1. Boot-time tunables -- append to /boot/loader.conf, then reboot.
+#    (These control kernel data structures sized at boot; they cannot be
+#     raised at runtime with sysctl.)
+cat >> /boot/loader.conf <<'EOF'
+kern.ipc.maxsockets=400000
+kern.ipc.nmbclusters=500000
+EOF
+shutdown -r now
 
-# 2. Runtime sysctls (persist in /etc/sysctl.conf; apply live with):
+# 2. Runtime sysctls -- apply live and persist across reboots.
 sysctl kern.ipc.somaxconn=65535
-sysctl kern.maxfiles=300000 kern.maxfilesperproc=250000
-sysctl net.inet.ip.portrange.first=10000 net.inet.ip.portrange.last=65535
+sysctl kern.maxfiles=300000
+sysctl kern.maxfilesperproc=250000
+sysctl net.inet.ip.portrange.first=10000
+sysctl net.inet.ip.portrange.last=65535
 
-# 3. Extra loopback addresses (only needed for N > 55 000):
+cat >> /etc/sysctl.conf <<'EOF'
+kern.ipc.somaxconn=65535
+kern.maxfiles=300000
+kern.maxfilesperproc=250000
+net.inet.ip.portrange.first=10000
+net.inet.ip.portrange.last=65535
+EOF
+
+# 3. Extra loopback source addresses -- only needed for N > 55 000, to
+#    work around the ~55 k single-source-IP ephemeral-port ceiling
+#    (TCP 4-tuple limit on 127.0.0.1 -> 127.0.0.1:5000).
 ifconfig lo0 alias 127.0.0.2/32
 ifconfig lo0 alias 127.0.0.3/32
 ifconfig lo0 alias 127.0.0.4/32
 
-# 4. In every shell that launches the server or the generator:
+# 4. Per-shell FD limit -- raise in every terminal that launches the
+#    server or the generator (do this before the process starts).
 ulimit -n 250000
 ```
 
-
+Values above are the exact final settings used for the 70 k run and match
+Table A.1 in `report.pdf`. Original FreeBSD defaults for reference:
+`kern.ipc.maxsockets`=64 177, `kern.ipc.nmbclusters`=125 007,
+`kern.ipc.somaxconn`=128, `kern.maxfiles`=29 053,
+`kern.maxfilesperproc`=26 148, `net.inet.ip.portrange.first`=49 152,
+`RLIMIT_NOFILE` soft cap=57 753.
 
 ### Running the experiment (three terminals)
 
