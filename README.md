@@ -41,6 +41,8 @@ To remove compiled files:
 make clean
 ```
 
+
+
 ## Run
 
 Use the launcher scripts in `server/` and `client/`. They pass every argument
@@ -90,28 +92,35 @@ python3 testing/test_client.py                  # drives ./trader_client itself
 Both exit non-zero if any check fails.
 
 ## Assumptions
+
 - Usernames are at most 127 characters. This is enforced and diagnosed rather than
-  assumed: a longer name is rejected with `ERROR Username too long`, never truncated.
+assumed: a longer name is rejected with `ERROR Username too long`, never truncated.
 - Integer values (quantity, price, order ID) fit in a 32-bit signed int, so at most
-  10 digits.
+10 digits.
 - Using epoll / kqueue for handling concurrent connections and multiplexing.
 - Using non-blocking sockets, otherwise the final recv() call would freeze the entire server waiting for data that hasn't arrived yet.
+
+
 
 ## Implementation Notes
 
 - Concurrency/I/O mechanism: a single-threaded event loop over non-blocking sockets.
-  The listening socket is level-triggered; client sockets are edge-triggered, so each
-  readable socket is drained until `EAGAIN`.
+The listening socket is level-triggered; client sockets are edge-triggered, so each
+readable socket is drained until `EAGAIN`.
 - Message-framing approach: a fixed per-connection line buffer sized from the protocol.
-  See *Bounded-line message framing* below.
+See *Bounded-line message framing* below.
 - Order-book/matching approach: `<briefly describe>`
 - Connection-error handling: `SIGPIPE` is ignored process-wide, so a client that
-  disappears mid-write fails the `write()` with `EPIPE` instead of terminating the
-  server. A connection is reaped when `read()` returns 0 (peer sent FIN) or fails with
-  anything other than `EINTR`/`EAGAIN`; its slot is freed and the descriptor removed
-  from the event set.
+disappears mid-write fails the `write()` with `EPIPE` instead of terminating the
+server. A connection is reaped when `read()` returns 0 (peer sent FIN) or fails with
+anything other than `EINTR`/`EAGAIN`; its slot is freed and the descriptor removed
+from the event set.
+
+
 
 ## Design Decisions
+
+
 
 ### Bounded-line message framing
 
@@ -123,15 +132,17 @@ the next read.
 **The buffer is sized from the protocol, not guessed.** The command set is closed and
 every token has a known maximum length, so the longest legal message is computable:
 
-| Message | Longest legal form | Bytes |
-| --- | --- | --- |
-| `LOGIN <username>` | `LOGIN` + ` ` + 127-char name | **133** |
-| `SELL <inst> <qty> <price>` | 4+1+4+1+10+1+10 | 31 |
-| `BUY <inst> <qty> <price>` | 3+1+4+1+10+1+10 | 30 |
-| `CANCEL <order_id>` | 6+1+10 | 17 |
-| `UNSUBSCRIBE <inst>` | 11+1+4 | 16 |
-| `SUBSCRIBE <inst>` | 9+1+4 | 14 |
-| `QUIT` | 4 | 4 |
+
+| Message                     | Longest legal form           | Bytes   |
+| --------------------------- | ---------------------------- | ------- |
+| `LOGIN <username>`          | `LOGIN` + `` + 127-char name | **133** |
+| `SELL <inst> <qty> <price>` | 4+1+4+1+10+1+10              | 31      |
+| `BUY <inst> <qty> <price>`  | 3+1+4+1+10+1+10              | 30      |
+| `CANCEL <order_id>`         | 6+1+10                       | 17      |
+| `UNSUBSCRIBE <inst>`        | 11+1+4                       | 16      |
+| `SUBSCRIBE <inst>`          | 9+1+4                        | 14      |
+| `QUIT`                      | 4                            | 4       |
+
 
 Instruments are 4 characters; integers are at most 10 digits (`INT_MAX` is
 2147483647); the longest command word is `UNSUBSCRIBE` at 11. `LOGIN` dominates, so
@@ -142,11 +153,13 @@ Nothing is hardcoded: changing `USERNAME_LENGTH` resizes the buffer correctly.
 diagnostic window, not slack. A line that is illegal but still fits is buffered whole,
 so the parser can identify *which* token is oversized and answer precisely:
 
-| Condition | Response |
-| --- | --- |
-| Command word longer than `UNSUBSCRIBE` | `ERROR Unknown command` |
-| `LOGIN` argument over 127 characters | `ERROR Username too long` |
-| Line too long to buffer at all | `ERROR Message too long` |
+
+| Condition                              | Response                  |
+| -------------------------------------- | ------------------------- |
+| Command word longer than `UNSUBSCRIBE` | `ERROR Unknown command`   |
+| `LOGIN` argument over 127 characters   | `ERROR Username too long` |
+| Line too long to buffer at all         | `ERROR Message too long`  |
+
 
 Without the headroom every one of these would collapse into the generic
 `ERROR Message too long`. The boundary is worth stating: a username of 128–153
@@ -181,22 +194,22 @@ scalability experiment.
 
 ## Bonus (Section 6.9) — running the scalability experiment
 
-The two helper programs required by the bonus live in `bonus/`:
+The two helper programs required by the bonus live in `src/bonus/`:
 
-- `bonus/idle_clients.py` — client-generation program. Opens N TCP connections to
-  the Exchange Server and holds them ESTABLISHED without exchanging any application
-  data. Prints progress and a summary of failures.
-- `bonus/measure.sh` — one-shot snapshot of the server's resource usage (RSS, %CPU,
-  FDs, mbuf clusters, socket-buffer sysctls, kernel stack). Meant to be run while
-  `idle_clients.py` is holding the connections open.
+- `src/bonus/idle_clients.py` — client-generation program. Opens N TCP connections to
+the Exchange Server and holds them ESTABLISHED without exchanging any application
+data. Prints progress and a summary of failures.
+- `src/bonus/measure.sh` — one-shot snapshot of the server's resource usage (RSS, %CPU,
+FDs, mbuf clusters, socket-buffer sysctls, kernel stack). Meant to be run while
+`idle_clients.py` is holding the connections open.
 
-Full tuning recipe, per-N raw outputs, and the analysis are in `bonus/README.md`
+Full tuning recipe, per-N raw outputs, and the analysis are in `src/bonus/README.md`
 and in the report appendix. Below are only the commands needed to reproduce the
 runs.
 
 ### Prerequisite: OS tuning (once, as root on FreeBSD 14)
 
-`bonus/README.md` §3–§5 has the full explanation. In brief, before the first run:
+`src/bonus/README.md` §3–§5 has the full explanation. In brief, before the first run:
 
 ```sh
 # 1. Boot-time tunables (edit /boot/loader.conf, then reboot):
@@ -217,6 +230,8 @@ ifconfig lo0 alias 127.0.0.4/32
 ulimit -n 250000
 ```
 
+
+
 ### Running the experiment (three terminals)
 
 **Terminal 1 — server:**
@@ -232,12 +247,12 @@ ulimit -n 250000
 ulimit -n 250000
 
 # 10 000 / 20 000 / 30 000 / 40 000 / 50 000: single source IP is enough.
-python3 bonus/idle_clients.py 127.0.0.1 5000 10000 --batch 2000
-python3 bonus/idle_clients.py 127.0.0.1 5000 50000 --batch 2000
+python3 src/bonus/idle_clients.py 127.0.0.1 5000 10000 --batch 2000
+python3 src/bonus/idle_clients.py 127.0.0.1 5000 50000 --batch 2000
 
 # 60 000 / 70 000: rotate across four 127.x.x.x source IPs to bypass the
 # ~55 000 single-source-IP ephemeral-port ceiling (TCP 4-tuple limit).
-python3 bonus/idle_clients.py 127.0.0.1 5000 70000 --batch 2000 \
+python3 src/bonus/idle_clients.py 127.0.0.1 5000 70000 --batch 2000 \
         --src-cidr 127.0.0.0/8 --src-count 4
 ```
 
@@ -247,7 +262,7 @@ Leave the generator running; it holds every socket open until you Ctrl-C it.
 
 ```sh
 SPID=$(pgrep -f exchange_server | head -1)   # or read it from Terminal 1's log
-./bonus/measure.sh $SPID 5000 | tee run_70k.txt
+./src/bonus/measure.sh $SPID 5000 | tee run_70k.txt
 ```
 
 Repeat for each N; save each output as `run_<N>.txt`. That single file supplies
@@ -259,7 +274,7 @@ kernel stack of the server thread from `procstat -k`).
 ### `idle_clients.py` command-line reference
 
 ```
-python3 bonus/idle_clients.py <host> <port> <n> [options]
+python3 src/bonus/idle_clients.py <host> <port> <n> [options]
 
   --batch B        progress log every B successful connects (default 500)
   --sleep S        sleep S seconds between connects (default 0)
