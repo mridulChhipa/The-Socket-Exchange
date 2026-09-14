@@ -14,3 +14,6 @@ __pycache__/
 src/exchange_server
 src/trader_client
 src/market_data_client
+
+424994780/
+*.zip
